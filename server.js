@@ -290,11 +290,40 @@ http.createServer(async (req, res) => {
     if (action === 'mailbox_list') {
       try {
         const mailboxes = await listMailboxes();
-        const lines = mailboxes.slice(0, 60).map(box => `• ${box.address}`);
-        await telegram('sendMessage', { chat_id: chatId, text: lines.length ? `📋 Posta kutuları (${mailboxes.length})\n${lines.join('\n')}` : 'Henüz posta kutusu yok.', reply_markup: controlMenu });
+        const lines = mailboxes.slice(0, 30).map(box => `• ${box.address}`);
+        const deleteButtons = mailboxes.slice(0, 30).map(box => [{ text: `🗑 ${box.address}`, callback_data: `delete:${box.id}` }]);
+        await telegram('sendMessage', { chat_id: chatId, text: lines.length ? `📋 Posta kutuları (${mailboxes.length})\nSilmek için aşağıdan bir adres seçin.` : 'Henüz posta kutusu yok.', reply_markup: deleteButtons.length ? { inline_keyboard: [...deleteButtons, [{ text: '↩ Menü', callback_data: 'menu' }]] } : controlMenu });
       } catch (error) {
         console.error('mailbox list failed', error.message);
         await telegram('sendMessage', { chat_id: chatId, text: '❌ Posta kutuları alınamadı. OpenInbox Render bağlantısını kontrol edin.', reply_markup: controlMenu });
+      }
+      return send(res, 200, JSON.stringify({ ok: true }));
+    }
+    if (action.startsWith('delete:')) {
+      const mailboxId = action.slice('delete:'.length);
+      try {
+        const mailbox = (await listMailboxes()).find(item => String(item.id) === mailboxId);
+        if (!mailbox) throw new Error('mailbox-not-found');
+        await telegram('sendMessage', {
+          chat_id: chatId,
+          text: `⚠️ ${mailbox.address} kutusu ve içindeki postalar kalıcı olarak silinecek.`,
+          reply_markup: { inline_keyboard: [[{ text: '🗑 Evet, kalıcı sil', callback_data: `confirmdelete:${mailbox.id}` }, { text: 'Vazgeç', callback_data: 'mailbox_list' }]] }
+        });
+      } catch {
+        await telegram('sendMessage', { chat_id: chatId, text: '❌ Kutu bulunamadı.', reply_markup: controlMenu });
+      }
+      return send(res, 200, JSON.stringify({ ok: true }));
+    }
+    if (action.startsWith('confirmdelete:')) {
+      const mailboxId = action.slice('confirmdelete:'.length);
+      try {
+        const mailbox = (await listMailboxes()).find(item => String(item.id) === mailboxId);
+        if (!mailbox) throw new Error('mailbox-not-found');
+        await openInboxRequest(`/admin/mailboxes/${mailbox.id}?confirm=${encodeURIComponent(mailbox.address)}`, { method: 'DELETE' });
+        await telegram('sendMessage', { chat_id: chatId, text: `✅ ${mailbox.address} kalıcı olarak silindi.`, reply_markup: controlMenu });
+      } catch (error) {
+        console.error('mailbox delete failed', error.message);
+        await telegram('sendMessage', { chat_id: chatId, text: '❌ Kutu silinemedi.', reply_markup: controlMenu });
       }
       return send(res, 200, JSON.stringify({ ok: true }));
     }
