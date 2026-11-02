@@ -12,12 +12,15 @@ const openInboxUrl = String(process.env.OPENINBOX_URL || '').trim().replace(/\/$
 const openInboxAdminEmail = String(process.env.OPENINBOX_ADMIN_EMAIL || '').trim().toLowerCase();
 const openInboxAdminPassword = String(process.env.OPENINBOX_ADMIN_PASSWORD || '');
 const openInboxForwardDestination = String(process.env.OPENINBOX_FORWARD_DESTINATION || 'clevervize@gmail.com').trim().toLowerCase();
+const brevoApiKey = String(process.env.BREVO_API_KEY || '').trim();
+const outboundSender = 'info@clevervize.com';
 const corporateDomain = 'clevervize.com';
 const publicUrl = String(process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/$/, '');
 const allowedChats = new Set(String(process.env.TELEGRAM_ALLOWED_CHAT_IDS || '')
   .split(',').map(value => value.trim()).filter(value => /^-?\d{5,20}$/.test(value)));
 const temporaryAuthorizations = new Map();
 const pendingMailboxNames = new Map();
+const pendingOutgoingEmails = new Map();
 const protectedMailboxAddresses = new Set(['havuz@clevervize.com', 'info@clevervize.com', 'admin@clevervize.com']);
 const AUTH_TTL_MS = 12 * 60 * 60 * 1000;
 let openInboxSession = { cookie: '', csrf: '', expiresAt: 0 };
@@ -82,6 +85,7 @@ const controlMenu = {
     [{ text: '➕ Yeni e-posta kutusu', callback_data: 'mailbox_create' }, { text: '📋 Kutuları listele', callback_data: 'mailbox_list' }],
     [{ text: '📊 Sistem durumu', callback_data: 'status' }, { text: '📥 Havuz durumu', callback_data: 'pool' }],
     [{ text: '🔑 Parola işlemleri', callback_data: 'password' }, { text: '🔄 Yenile', callback_data: 'menu' }],
+    [{ text: '📤 info@ ile mail gönder', callback_data: 'send_email' }],
     [{ text: '❓ Yardım', callback_data: 'help' }]
   ]
 };
@@ -100,6 +104,12 @@ function responseFor(action) {
 
 function isOpenInboxConfigured() {
   return Boolean(openInboxUrl && openInboxAdminEmail && openInboxAdminPassword);
+}
+
+async function sendInfoEmail({ to, subject, message }) {
+  if (!brevoApiKey) throw new Error('brevo-not-configured');
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', headers: { 'Content-Type': 'application/json', 'api-key': brevoApiKey }, body: JSON.stringify({ sender: { name: 'Clever Vize & Danışmanlık', email: outboundSender }, to: [{ email: to }], replyTo: { email: outboundSender }, subject, textContent: message }) });
+  if (!response.ok) throw new Error(`brevo-${response.status}`);
 }
 
 function cookiePairs(response) {
@@ -283,6 +293,15 @@ http.createServer(async (req, res) => {
       }
       return send(res, 200, JSON.stringify({ ok: true }));
     }
+    if (pendingOutgoingEmails.has(chatId) && message && text && text !== '📬 Menü') {
+      const draft = pendingOutgoingEmails.get(chatId);
+      if (!draft.to) { draft.to = text.trim().toLowerCase(); await telegram('sendMessage', { chat_id: chatId, text: 'Konu yazın:', reply_markup: persistentMenu }); return send(res, 200, JSON.stringify({ ok: true })); }
+      if (!draft.subject) { draft.subject = text.trim().slice(0, 180); await telegram('sendMessage', { chat_id: chatId, text: 'Mesajı yazın:', reply_markup: persistentMenu }); return send(res, 200, JSON.stringify({ ok: true })); }
+      pendingOutgoingEmails.delete(chatId);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draft.to) || !draft.subject || !text.trim()) { await telegram('sendMessage', { chat_id: chatId, text: '❌ Geçersiz alıcı, konu veya mesaj.', reply_markup: controlMenu }); return send(res, 200, JSON.stringify({ ok: true })); }
+      try { await sendInfoEmail({ to: draft.to, subject: draft.subject, message: text.trim().slice(0, 20000) }); await telegram('sendMessage', { chat_id: chatId, text: `✅ E-posta ${outboundSender} adresinden gönderildi.`, reply_markup: controlMenu }); } catch { await telegram('sendMessage', { chat_id: chatId, text: '❌ Gönderim için Brevo API anahtarı veya domain doğrulaması eksik.', reply_markup: controlMenu }); }
+      return send(res, 200, JSON.stringify({ ok: true }));
+    }
     const action = callback?.data || (text === '📬 Menü' ? 'menu' : (/^\/(start|help)/i.test(text) ? 'menu' : 'help'));
     if (action === 'mailbox_create') {
       if (!isOpenInboxConfigured()) {
@@ -291,6 +310,11 @@ http.createServer(async (req, res) => {
         pendingMailboxNames.set(chatId, Date.now());
         await telegram('sendMessage', { chat_id: chatId, text: 'Yeni kutu için sadece isim yazın. Örnek: VFS Fransa → vfs-fransa@clevervize.com', reply_markup: persistentMenu });
       }
+      return send(res, 200, JSON.stringify({ ok: true }));
+    }
+    if (action === 'send_email') {
+      if (!brevoApiKey) await telegram('sendMessage', { chat_id: chatId, text: '❌ Brevo gönderim anahtarı henüz Render’da yok.', reply_markup: controlMenu });
+      else { pendingOutgoingEmails.set(chatId, {}); await telegram('sendMessage', { chat_id: chatId, text: 'Alıcı e-posta adresini yazın:', reply_markup: persistentMenu }); }
       return send(res, 200, JSON.stringify({ ok: true }));
     }
     if (action === 'mailbox_list') {
