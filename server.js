@@ -4,8 +4,11 @@ const crypto = require('node:crypto');
 const port = Number(process.env.PORT || 3000);
 const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const webhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+const accessPassword = String(process.env.TELEGRAM_ACCESS_PASSWORD || '').trim();
 const allowedChats = new Set(String(process.env.TELEGRAM_ALLOWED_CHAT_IDS || '')
   .split(',').map(value => value.trim()).filter(value => /^-?\d{5,20}$/.test(value)));
+const temporaryAuthorizations = new Map();
+const AUTH_TTL_MS = 12 * 60 * 60 * 1000;
 
 function send(res, status, body = '', headers = {}) {
   res.writeHead(status, {
@@ -67,6 +70,21 @@ function responseFor(action) {
   return menuText();
 }
 
+function isAuthorized(chatId) {
+  if (allowedChats.has(chatId)) return true;
+  const expiresAt = temporaryAuthorizations.get(chatId);
+  if (!expiresAt || expiresAt <= Date.now()) {
+    temporaryAuthorizations.delete(chatId);
+    return false;
+  }
+  return true;
+}
+
+function suppliedPassword(text) {
+  const value = String(text || '').trim();
+  return value.replace(/^\/giris\s+/i, '').trim();
+}
+
 http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (url.pathname === '/healthz' && ['GET', 'HEAD'].includes(req.method)) {
@@ -83,9 +101,21 @@ http.createServer(async (req, res) => {
     const message = update?.message;
     const callback = update?.callback_query;
     const chatId = String(message?.chat?.id || callback?.message?.chat?.id || '');
-    if (!allowedChats.has(chatId)) return send(res, 200, JSON.stringify({ ok: true }));
-    if (callback?.id) await telegram('answerCallbackQuery', { callback_query_id: callback.id });
     const text = String(message?.text || '');
+    if (!isAuthorized(chatId)) {
+      const candidate = suppliedPassword(text);
+      if (!accessPassword || candidate.length !== accessPassword.length || !crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(accessPassword))) {
+        await telegram('sendMessage', { chat_id: chatId, text: 'Erişim için /giris PAROLA yazın.' });
+        return send(res, 200, JSON.stringify({ ok: true }));
+      }
+      temporaryAuthorizations.set(chatId, Date.now() + AUTH_TTL_MS);
+      // Parola mümkün olduğunda sohbette kalmaması için giriş mesajını siler.
+      if (message?.message_id) await telegram('deleteMessage', { chat_id: chatId, message_id: message.message_id }).catch(() => undefined);
+      await telegram('sendMessage', { chat_id: chatId, text: '✅ Erişim verildi. 12 saat boyunca menüyü kullanabilirsiniz.', reply_markup: persistentMenu });
+      await telegram('sendMessage', { chat_id: chatId, text: menuText(), reply_markup: controlMenu });
+      return send(res, 200, JSON.stringify({ ok: true }));
+    }
+    if (callback?.id) await telegram('answerCallbackQuery', { callback_query_id: callback.id });
     const action = callback?.data || (text === '📬 Menü' ? 'menu' : (/^\/(start|help)/i.test(text) ? 'menu' : 'help'));
     if (action === 'menu') {
       await telegram('sendMessage', { chat_id: chatId, text: '📬 Menü sabitlendi.', reply_markup: persistentMenu });
