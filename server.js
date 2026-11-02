@@ -93,7 +93,7 @@ function menuText() {
 function responseFor(action) {
   if (action === 'status') return `🟢 Bot aktif. OpenInbox bağlantısı: ${isOpenInboxConfigured() ? 'hazır' : 'Render değişkenleri eksik'}.`;
   if (action === 'pool') return '📥 Havuz yönlendirmesi etkin: havuz@clevervize.com gelen postaları Clever Gmail havuzuna iletir. Ajanda bu Gmail hesabını IMAP ile izleyerek bildirimi Telegram’a taşır.';
-  if (action === 'password') return '🔑 Parola sıfırlama ve silme kontrolleri bir sonraki menü güncellemesinde her kutunun yanında yer alacak.';
+  if (action === 'password') return '🔑 Parola işlemleri için aşağıdan bir posta kutusu seçin.';
   if (action === 'help') return 'Alt kısımdaki 📬 Menü düğmesine dilediğiniz an basarak kontrol panelini açabilirsiniz.';
   return menuText();
 }
@@ -175,6 +175,11 @@ async function createMailbox(displayName) {
 async function listMailboxes() {
   const mailboxes = await openInboxRequest('/admin/mailboxes');
   return Array.isArray(mailboxes) ? mailboxes : [];
+}
+
+async function listMailboxUsers() {
+  const users = await openInboxRequest('/admin/users');
+  return Array.isArray(users) ? users : [];
 }
 
 function isAuthorized(chatId) {
@@ -299,6 +304,45 @@ http.createServer(async (req, res) => {
       } catch (error) {
         console.error('mailbox list failed', error.message);
         await telegram('sendMessage', { chat_id: chatId, text: '❌ Posta kutuları alınamadı. OpenInbox Render bağlantısını kontrol edin.', reply_markup: controlMenu });
+      }
+      return send(res, 200, JSON.stringify({ ok: true }));
+    }
+    if (action === 'password') {
+      try {
+        const [mailboxes, users] = await Promise.all([listMailboxes(), listMailboxUsers()]);
+        const buttons = mailboxes.slice(0, 30).flatMap(box => {
+          const member = (box.members || [])[0];
+          const user = users.find(item => item.id === member?.userId || String(item.email || '').toLowerCase() === String(box.address || '').toLowerCase());
+          return user?.id ? [[{ text: `🔑 ${box.address}`, callback_data: `passwordreset:${user.id}` }]] : [];
+        });
+        await telegram('sendMessage', {
+          chat_id: chatId,
+          text: buttons.length ? '🔑 Parolasını oluşturmak/değiştirmek istediğiniz kutuyu seçin. Eski parola geçersiz olur.' : 'Parolası yönetilebilen posta kutusu bulunamadı.',
+          reply_markup: buttons.length ? { inline_keyboard: [...buttons, [{ text: '↩ Menü', callback_data: 'menu' }]] } : controlMenu
+        });
+      } catch (error) {
+        console.error('password list failed', error.message);
+        await telegram('sendMessage', { chat_id: chatId, text: '❌ Posta kutuları alınamadı. OpenInbox bağlantısını kontrol edin.', reply_markup: controlMenu });
+      }
+      return send(res, 200, JSON.stringify({ ok: true }));
+    }
+    if (action.startsWith('passwordreset:')) {
+      const userId = action.slice('passwordreset:'.length);
+      try {
+        const users = await listMailboxUsers();
+        const user = users.find(item => String(item.id) === userId);
+        if (!user) throw new Error('mailbox-user-not-found');
+        const result = await openInboxRequest(`/admin/users/${userId}/reset-password`, { method: 'POST', body: {} });
+        if (!result?.password) throw new Error('password-not-returned');
+        await telegram('sendMessage', {
+          chat_id: chatId,
+          text: `✅ ${user.email} için yeni parola oluşturuldu:\n\n<code>${result.password}</code>\n\nBu mesajı kimseyle paylaşmayın; eski parola artık geçersizdir.`,
+          parse_mode: 'HTML',
+          reply_markup: controlMenu
+        });
+      } catch (error) {
+        console.error('password reset failed', error.message);
+        await telegram('sendMessage', { chat_id: chatId, text: '❌ Parola oluşturulamadı. OpenInbox bağlantısını kontrol edin.', reply_markup: controlMenu });
       }
       return send(res, 200, JSON.stringify({ ok: true }));
     }
