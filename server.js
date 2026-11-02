@@ -18,6 +18,7 @@ const allowedChats = new Set(String(process.env.TELEGRAM_ALLOWED_CHAT_IDS || '')
   .split(',').map(value => value.trim()).filter(value => /^-?\d{5,20}$/.test(value)));
 const temporaryAuthorizations = new Map();
 const pendingMailboxNames = new Map();
+const protectedMailboxAddresses = new Set(['havuz@clevervize.com', 'info@clevervize.com', 'admin@clevervize.com']);
 const AUTH_TTL_MS = 12 * 60 * 60 * 1000;
 let openInboxSession = { cookie: '', csrf: '', expiresAt: 0 };
 
@@ -291,7 +292,9 @@ http.createServer(async (req, res) => {
       try {
         const mailboxes = await listMailboxes();
         const lines = mailboxes.slice(0, 30).map(box => `• ${box.address}`);
-        const deleteButtons = mailboxes.slice(0, 30).map(box => [{ text: `🗑 ${box.address}`, callback_data: `delete:${box.id}` }]);
+        const deleteButtons = mailboxes.slice(0, 30)
+          .filter(box => !protectedMailboxAddresses.has(String(box.address || '').toLowerCase()))
+          .map(box => [{ text: `🗑 ${box.address}`, callback_data: `delete:${box.id}` }]);
         await telegram('sendMessage', { chat_id: chatId, text: lines.length ? `📋 Posta kutuları (${mailboxes.length})\nSilmek için aşağıdan bir adres seçin.` : 'Henüz posta kutusu yok.', reply_markup: deleteButtons.length ? { inline_keyboard: [...deleteButtons, [{ text: '↩ Menü', callback_data: 'menu' }]] } : controlMenu });
       } catch (error) {
         console.error('mailbox list failed', error.message);
@@ -304,6 +307,7 @@ http.createServer(async (req, res) => {
       try {
         const mailbox = (await listMailboxes()).find(item => String(item.id) === mailboxId);
         if (!mailbox) throw new Error('mailbox-not-found');
+        if (protectedMailboxAddresses.has(String(mailbox.address || '').toLowerCase())) throw new Error('protected-mailbox');
         await telegram('sendMessage', {
           chat_id: chatId,
           text: `⚠️ ${mailbox.address} kutusu ve içindeki postalar kalıcı olarak silinecek.`,
@@ -319,6 +323,7 @@ http.createServer(async (req, res) => {
       try {
         const mailbox = (await listMailboxes()).find(item => String(item.id) === mailboxId);
         if (!mailbox) throw new Error('mailbox-not-found');
+        if (protectedMailboxAddresses.has(String(mailbox.address || '').toLowerCase())) throw new Error('protected-mailbox');
         await openInboxRequest(`/admin/mailboxes/${mailbox.id}?confirm=${encodeURIComponent(mailbox.address)}`, { method: 'DELETE' });
         await telegram('sendMessage', { chat_id: chatId, text: `✅ ${mailbox.address} kalıcı olarak silindi.`, reply_markup: controlMenu });
       } catch (error) {
