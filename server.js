@@ -83,7 +83,7 @@ function menuText() {
 
 function responseFor(action) {
   if (action === 'status') return '🟢 Bot aktif. Render sağlık kontrolü çalışıyor.';
-  if (action === 'pool') return '📥 IMAP havuzu henüz bağlanmadı. Havuz bilgileri Randevu Ajanda servisine eklendiğinde burada posta sayısı ve son bildirimler görünür.';
+  if (action === 'pool') return '📥 Havuz yönlendirmesi etkin: havuz@clevervize.com gelen postaları Clever Gmail havuzuna iletir. Ajanda bu Gmail hesabını IMAP ile izleyerek bildirimi Telegram’a taşır.';
   if (action === 'password') return '🔑 Parola sıfırlama, gerçek IMAP kullanıcıları bağlandıktan sonra bu menüden yetki kontrolüyle açılacak.';
   if (action === 'help') return 'Alt kısımdaki 📬 Menü düğmesine dilediğiniz an basarak kontrol panelini açabilirsiniz.';
   return menuText();
