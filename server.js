@@ -165,7 +165,9 @@ async function createMailbox(displayName) {
   const createdBoxes = await openInboxRequest('/admin/mailboxes');
   const mailbox = createdBoxes.find(item => String(item?.address || '').toLowerCase() === `${local}@${corporateDomain}`);
   if (!mailbox?.id) throw new Error('openinbox-mailbox-not-created');
-  await openInboxRequest(`/mailboxes/${mailbox.id}/settings`, { method: 'PATCH', body: { forwardTo: [openInboxForwardDestination] } });
+  // Yönetici, yeni kişisel kutunun üyesi değildir. Kullanıcıya ait ayar
+  // uç noktası bu nedenle 404 verir; yönetici uç noktası üyelik istemez.
+  await openInboxRequest(`/admin/mailboxes/${mailbox.id}`, { method: 'PATCH', body: { forwardTo: [openInboxForwardDestination] } });
   return mailbox.address;
 }
 
