@@ -5,6 +5,7 @@ const port = Number(process.env.PORT || 3000);
 const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const webhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
 const accessPassword = String(process.env.TELEGRAM_ACCESS_PASSWORD || '').trim();
+const publicUrl = String(process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/$/, '');
 const allowedChats = new Set(String(process.env.TELEGRAM_ALLOWED_CHAT_IDS || '')
   .split(',').map(value => value.trim()).filter(value => /^-?\d{5,20}$/.test(value)));
 const temporaryAuthorizations = new Map();
@@ -42,6 +43,21 @@ async function telegram(method, body) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) throw new Error('telegram-request-failed');
   return payload.result;
+}
+
+async function registerWebhook() {
+  if (!token || !webhookSecret || !publicUrl) return;
+  try {
+    await telegram('setWebhook', {
+      url: `${publicUrl}/telegram/webhook`,
+      secret_token: webhookSecret,
+      allowed_updates: ['message', 'callback_query'],
+      drop_pending_updates: true
+    });
+    console.log('telegram webhook registered');
+  } catch (error) {
+    console.error('telegram webhook registration failed', error.message);
+  }
 }
 
 const persistentMenu = {
@@ -128,4 +144,7 @@ http.createServer(async (req, res) => {
     console.error('webhook failed', error.message);
     return send(res, 200, JSON.stringify({ ok: true }));
   }
-}).listen(port, '0.0.0.0', () => console.log(`telegram control listening on ${port}`));
+}).listen(port, '0.0.0.0', () => {
+  console.log(`telegram control listening on ${port}`);
+  void registerWebhook();
+});
