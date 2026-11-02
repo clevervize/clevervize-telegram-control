@@ -5,6 +5,9 @@ const port = Number(process.env.PORT || 3000);
 const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const webhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
 const accessPassword = String(process.env.TELEGRAM_ACCESS_PASSWORD || '').trim();
+// OpenInbox Worker posts only a compact, signed event here.  This is separate
+// from Telegram's webhook secret so one integration cannot impersonate the other.
+const inboxEventSecret = String(process.env.OPENINBOX_EVENT_SECRET || '').trim();
 const publicUrl = String(process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/$/, '');
 const allowedChats = new Set(String(process.env.TELEGRAM_ALLOWED_CHAT_IDS || '')
   .split(',').map(value => value.trim()).filter(value => /^-?\d{5,20}$/.test(value)));
@@ -101,10 +104,51 @@ function suppliedPassword(text) {
   return value.replace(/^\/giris\s+/i, '').trim();
 }
 
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a || ''));
+  const right = Buffer.from(String(b || ''));
+  return left.length === right.length && left.length > 0 && crypto.timingSafeEqual(left, right);
+}
+
+function inboxEventText(event) {
+  const mailbox = String(event?.mailbox || '').trim();
+  const from = String(event?.from || '').trim();
+  const subject = String(event?.subject || '(konu yok)').trim();
+  const snippet = String(event?.snippet || '').replace(/\s+/g, ' ').trim();
+  if (!mailbox || !from) return null;
+  return [
+    '📬 Yeni Clever Vize e-postası',
+    '',
+    `Kutu: ${mailbox}`,
+    `Kimden: ${from}`,
+    `Konu: ${subject}`,
+    snippet ? `Özet: ${snippet.slice(0, 700)}` : ''
+  ].filter(Boolean).join('\n');
+}
+
 http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (url.pathname === '/healthz' && ['GET', 'HEAD'].includes(req.method)) {
     return send(res, 200, req.method === 'HEAD' ? '' : JSON.stringify({ status: 'ok', telegramConfigured: Boolean(token && webhookSecret && allowedChats.size) }));
+  }
+  if (url.pathname === '/openinbox/event' && req.method === 'POST') {
+    if (!safeEqual(req.headers['x-openinbox-event-secret'], inboxEventSecret)) {
+      return send(res, 403, JSON.stringify({ error: 'forbidden' }));
+    }
+    try {
+      const event = await readJson(req);
+      const text = inboxEventText(event);
+      if (!text) return send(res, 400, JSON.stringify({ error: 'invalid-event' }));
+      let delivered = 0;
+      for (const chatId of allowedChats) {
+        await telegram('sendMessage', { chat_id: chatId, text, reply_markup: persistentMenu });
+        delivered += 1;
+      }
+      return send(res, 200, JSON.stringify({ ok: true, delivered }));
+    } catch (error) {
+      console.error('openinbox event failed', error.message);
+      return send(res, 502, JSON.stringify({ error: 'delivery-failed' }));
+    }
   }
   if (url.pathname !== '/telegram/webhook' || req.method !== 'POST') return send(res, 404, JSON.stringify({ error: 'not-found' }));
   const receivedSecret = Buffer.from(String(req.headers['x-telegram-bot-api-secret-token'] || ''));
