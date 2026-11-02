@@ -41,13 +41,30 @@ async function telegram(method, body) {
   return payload.result;
 }
 
-function replyFor(text) {
-  const command = String(text || '').trim().split(/\s+/, 1)[0].replace(/@[^\s]+$/, '').toLowerCase();
-  if (command === '/start' || command === '/help') {
-    return 'Clever Vize kontrol botu aktif. Komutlar: /status, /help. IMAP havuzu bağlandığında randevu ve OTP bildirimleri burada görünecek.';
-  }
-  if (command === '/status') return 'Bot aktif. IMAP havuzu henüz yapılandırılmadı.';
-  return 'Bilinmeyen komut. /help yazabilirsiniz.';
+const persistentMenu = {
+  keyboard: [[{ text: '📬 Menü' }]],
+  resize_keyboard: true,
+  is_persistent: true
+};
+
+const controlMenu = {
+  inline_keyboard: [
+    [{ text: '📊 Sistem durumu', callback_data: 'status' }, { text: '📥 Havuz durumu', callback_data: 'pool' }],
+    [{ text: '🔑 Parola işlemleri', callback_data: 'password' }, { text: '🔄 Yenile', callback_data: 'menu' }],
+    [{ text: '❓ Yardım', callback_data: 'help' }]
+  ]
+};
+
+function menuText() {
+  return 'Clever Vize kontrol merkezi. İşlemler bu menüdeki butonlardan yapılır. IMAP havuzu bağlandığında posta kutusu ve randevu bildirimleri burada açılacak.';
+}
+
+function responseFor(action) {
+  if (action === 'status') return '🟢 Bot aktif. Render sağlık kontrolü çalışıyor.';
+  if (action === 'pool') return '📥 IMAP havuzu henüz bağlanmadı. Havuz bilgileri Randevu Ajanda servisine eklendiğinde burada posta sayısı ve son bildirimler görünür.';
+  if (action === 'password') return '🔑 Parola sıfırlama, gerçek IMAP kullanıcıları bağlandıktan sonra bu menüden yetki kontrolüyle açılacak.';
+  if (action === 'help') return 'Alt kısımdaki 📬 Menü düğmesine dilediğiniz an basarak kontrol panelini açabilirsiniz.';
+  return menuText();
 }
 
 http.createServer(async (req, res) => {
@@ -64,9 +81,18 @@ http.createServer(async (req, res) => {
   try {
     const update = await readJson(req);
     const message = update?.message;
-    const chatId = String(message?.chat?.id || '');
-    if (!allowedChats.has(chatId) || !message?.text) return send(res, 200, JSON.stringify({ ok: true }));
-    await telegram('sendMessage', { chat_id: chatId, text: replyFor(message.text) });
+    const callback = update?.callback_query;
+    const chatId = String(message?.chat?.id || callback?.message?.chat?.id || '');
+    if (!allowedChats.has(chatId)) return send(res, 200, JSON.stringify({ ok: true }));
+    if (callback?.id) await telegram('answerCallbackQuery', { callback_query_id: callback.id });
+    const text = String(message?.text || '');
+    const action = callback?.data || (text === '📬 Menü' ? 'menu' : (/^\/(start|help)/i.test(text) ? 'menu' : 'help'));
+    if (action === 'menu') {
+      await telegram('sendMessage', { chat_id: chatId, text: '📬 Menü sabitlendi.', reply_markup: persistentMenu });
+      await telegram('sendMessage', { chat_id: chatId, text: responseFor(action), reply_markup: controlMenu });
+    } else {
+      await telegram('sendMessage', { chat_id: chatId, text: responseFor(action), reply_markup: persistentMenu });
+    }
     return send(res, 200, JSON.stringify({ ok: true }));
   } catch (error) {
     console.error('webhook failed', error.message);
