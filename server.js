@@ -12,6 +12,8 @@ const openInboxUrl = String(process.env.OPENINBOX_URL || '').trim().replace(/\/$
 const openInboxAdminEmail = String(process.env.OPENINBOX_ADMIN_EMAIL || '').trim().toLowerCase();
 const openInboxAdminPassword = String(process.env.OPENINBOX_ADMIN_PASSWORD || '');
 const openInboxForwardDestination = String(process.env.OPENINBOX_FORWARD_DESTINATION || 'clevervize@gmail.com').trim().toLowerCase();
+const founderMailApiKey = String(process.env.FOUNDERMAIL_API_KEY || '').trim();
+const founderMailApiBase = 'https://api.foundermail.mx';
 const brevoApiKey = String(process.env.BREVO_API_KEY || '').trim();
 const outboundSender = 'info@clevervize.com';
 const corporateDomain = 'clevervize.com';
@@ -24,6 +26,9 @@ const pendingOutgoingEmails = new Map();
 const protectedMailboxAddresses = new Set(['havuz@clevervize.com', 'info@clevervize.com', 'admin@clevervize.com']);
 const AUTH_TTL_MS = 12 * 60 * 60 * 1000;
 let openInboxSession = { cookie: '', csrf: '', expiresAt: 0 };
+const founderSeenMessages = new Set();
+let founderPollingStarted = false;
+let founderPollingInitialized = false;
 
 function send(res, status, body = '', headers = {}) {
   res.writeHead(status, {
@@ -91,12 +96,12 @@ const controlMenu = {
 };
 
 function menuText() {
-  return 'Clever Vize e-posta kontrol merkezi. Yeni kutu açıldığında adres otomatik olarak Gmail havuzuna yönlendirilir; Ajanda buradan Telegram bildirimi üretir.';
+  return "Clever Vize e-posta kontrol merkezi. Yeni gerçek posta kutuları FounderMail üzerinde açılır; gelen kutusu ve Junk klasöründeki yeni postalar Telegram'a bildirilir.";
 }
 
 function responseFor(action) {
-  if (action === 'status') return `🟢 Bot aktif. OpenInbox bağlantısı: ${isOpenInboxConfigured() ? 'hazır' : 'Render değişkenleri eksik'}.`;
-  if (action === 'pool') return '📥 Havuz yönlendirmesi etkin: havuz@clevervize.com gelen postaları Clever Gmail havuzuna iletir. Ajanda bu Gmail hesabını IMAP ile izleyerek bildirimi Telegram’a taşır.';
+  if (action === 'status') return `🟢 Bot aktif. Posta servisi: ${isFounderMailConfigured() ? 'FounderMail hazır' : 'Render değişkenleri eksik'}.`;
+  if (action === 'pool') return '📥 Havuz durumu: havuz@clevervize.com korunan ana kutudur. Tüm Clever Vize kutularındaki gelen ve Junk postalar doğrudan Telegram bildirim akışında izlenir.';
   if (action === 'password') return '🔑 Parola işlemleri için aşağıdan bir posta kutusu seçin.';
   if (action === 'help') return 'Alt kısımdaki 📬 Menü düğmesine dilediğiniz an basarak kontrol panelini açabilirsiniz.';
   return menuText();
@@ -106,7 +111,31 @@ function isOpenInboxConfigured() {
   return Boolean(openInboxUrl && openInboxAdminEmail && openInboxAdminPassword);
 }
 
+function isFounderMailConfigured() { return Boolean(founderMailApiKey); }
+
+async function founderMailRequest(pathname, { method = 'GET', body } = {}) {
+  if (!isFounderMailConfigured()) throw new Error('foundermail-not-configured');
+  const response = await fetch(`${founderMailApiBase}${pathname}`, {
+    method,
+    headers: { 'X-Api-Key': founderMailApiKey, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+  });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
+  if (!response.ok) throw new Error(`foundermail-${response.status}`);
+  return payload;
+}
+
+async function founderMailboxes() {
+  const data = await founderMailRequest('/mailboxes');
+  return (Array.isArray(data) ? data : (data?.mailboxes || data?.data || []))
+    .filter(box => String(box?.address || '').toLowerCase().endsWith(`@${corporateDomain}`));
+}
+
 async function sendInfoEmail({ to, subject, message }) {
+  if (isFounderMailConfigured()) {
+    return founderMailRequest('/messages/info/send', { method: 'POST', body: { to: [to], subject, text: message, html: null, from: null } });
+  }
   if (!brevoApiKey) throw new Error('brevo-not-configured');
   const response = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', headers: { 'Content-Type': 'application/json', 'api-key': brevoApiKey }, body: JSON.stringify({ sender: { name: 'Clever Vize & Danışmanlık', email: outboundSender }, to: [{ email: to }], replyTo: { email: outboundSender }, subject, textContent: message }) });
   if (!response.ok) throw new Error(`brevo-${response.status}`);
@@ -153,7 +182,7 @@ async function openInboxRequest(pathname, { method = 'GET', body, retry = true }
 function mailboxLocalPart(name) {
   return String(name || '').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/ı/g, 'i').replace(/ş/g, 's').replace(/ğ/g, 'g').replace(/ü/g, 'u').replace(/ö/g, 'o').replace(/ç/g, 'c')
-    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    .replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '').replace(/\.{2,}/g, '.').slice(0, 60);
 }
 
 function generatedMailboxPassword() { return crypto.randomBytes(24).toString('base64url'); }
@@ -161,6 +190,16 @@ function generatedMailboxPassword() { return crypto.randomBytes(24).toString('ba
 async function createMailbox(displayName) {
   const base = mailboxLocalPart(displayName);
   if (!base || String(displayName).trim().length < 2) throw new Error('invalid-mailbox-name');
+  if (isFounderMailConfigured()) {
+    const boxes = await founderMailboxes();
+    const used = new Set(boxes.map(box => String(box.address || '').toLowerCase()));
+    let local = base;
+    for (let suffix = 2; used.has(`${local}@${corporateDomain}`) && suffix <= 99; suffix += 1) local = `${base.slice(0, Math.max(1, 61 - String(suffix).length))}.${suffix}`;
+    if (used.has(`${local}@${corporateDomain}`)) throw new Error('mailbox-name-exhausted');
+    const created = await founderMailRequest('/mailboxes', { method: 'POST', body: { name: local, domain: corporateDomain } });
+    const mailbox = created?.mailbox || created;
+    return { address: String(mailbox?.address || `${local}@${corporateDomain}`).toLowerCase(), password: typeof mailbox?.password === 'string' ? mailbox.password : '' };
+  }
   const [domains, users, mailboxes, destinations] = await Promise.all([
     openInboxRequest('/admin/domains'), openInboxRequest('/admin/users'), openInboxRequest('/admin/mailboxes'), openInboxRequest('/admin/forwarding')
   ]);
@@ -179,15 +218,17 @@ async function createMailbox(displayName) {
   // Yönetici, yeni kişisel kutunun üyesi değildir. Kullanıcıya ait ayar
   // uç noktası bu nedenle 404 verir; yönetici uç noktası üyelik istemez.
   await openInboxRequest(`/admin/mailboxes/${mailbox.id}`, { method: 'PATCH', body: { forwardTo: [openInboxForwardDestination] } });
-  return mailbox.address;
+  return { address: mailbox.address, password: '' };
 }
 
 async function listMailboxes() {
+  if (isFounderMailConfigured()) return founderMailboxes();
   const mailboxes = await openInboxRequest('/admin/mailboxes');
   return Array.isArray(mailboxes) ? mailboxes : [];
 }
 
 async function listMailboxUsers() {
+  if (isFounderMailConfigured()) return [];
   const users = await openInboxRequest('/admin/users');
   return Array.isArray(users) ? users : [];
 }
@@ -227,6 +268,55 @@ function inboxEventText(event) {
     `Konu: ${subject}`,
     snippet ? `Özet: ${snippet.slice(0, 700)}` : ''
   ].filter(Boolean).join('\n');
+}
+
+function founderMessageText(mailbox, message) {
+  const from = Array.isArray(message?.from) ? message.from.join(', ') : String(message?.from || 'Bilinmeyen gönderici');
+  const folder = String(message?.folderRole || message?.folder || '').toLowerCase();
+  const isJunk = folder === 'junk' || folder === 'spam';
+  return [
+    isJunk ? '⚠️ Junk / spam klasörüne yeni e-posta' : '📬 Yeni Clever Vize e-postası',
+    '', `Kutu: ${mailbox.address}`, `Kimden: ${from}`,
+    `Konu: ${String(message?.subject || '(konu yok)').slice(0, 500)}`,
+    `Klasör: ${message?.folder || (isJunk ? 'Junk' : 'INBOX')}`
+  ].join('\n');
+}
+
+async function pollFounderMail() {
+  if (!isFounderMailConfigured() || !token || !allowedChats.size) return;
+  const mailboxes = await founderMailboxes();
+  for (const mailbox of mailboxes) {
+    const key = encodeURIComponent(mailbox.address || mailbox.key);
+    const result = await founderMailRequest(`/messages/${key}/search?folder=all&take=25`);
+    const messages = Array.isArray(result?.messages) ? result.messages : [];
+    for (const message of messages) {
+      const identity = `${mailbox.address || mailbox.key}:${message?.uniqueId || message?.id}`;
+      if (!message?.id || founderSeenMessages.has(identity)) continue;
+      founderSeenMessages.add(identity);
+      if (!founderPollingInitialized) continue;
+      for (const chatId of allowedChats) await telegram('sendMessage', { chat_id: chatId, text: founderMessageText(mailbox, message), reply_markup: persistentMenu });
+    }
+  }
+  if (founderSeenMessages.size > 3000) {
+    const keep = [...founderSeenMessages].slice(-1500);
+    founderSeenMessages.clear(); for (const key of keep) founderSeenMessages.add(key);
+  }
+}
+
+async function startFounderPolling() {
+  if (founderPollingStarted || !isFounderMailConfigured()) return;
+  founderPollingStarted = true;
+  // İlk tur yalnızca başlangıç kaydını alır; ardından tüm kutular (Junk dahil)
+  // yaklaşık yarım dakikada bir izlenir.
+  try {
+    const boxes = await founderMailboxes();
+    for (const box of boxes) {
+      const result = await founderMailRequest(`/messages/${encodeURIComponent(box.address || box.key)}/search?folder=all&take=25`);
+      for (const message of (result?.messages || [])) founderSeenMessages.add(`${box.address || box.key}:${message?.uniqueId || message?.id}`);
+    }
+  } catch (error) { console.error('FounderMail initial scan failed', error.message); }
+  founderPollingInitialized = true;
+  setInterval(() => { void pollFounderMail().catch(error => console.error('FounderMail poll failed', error.message)); }, 30_000).unref();
 }
 
 http.createServer(async (req, res) => {
@@ -282,13 +372,12 @@ http.createServer(async (req, res) => {
     if (pendingMailboxNames.has(chatId) && message && text && text !== '📬 Menü') {
       pendingMailboxNames.delete(chatId);
       try {
-        const address = await createMailbox(text);
-        await telegram('sendMessage', { chat_id: chatId, text: `✅ ${address} oluşturuldu. Gelen tüm postalar ${openInboxForwardDestination} havuzuna yönlendirilir.`, reply_markup: controlMenu });
+        const created = await createMailbox(text);
+        await telegram('sendMessage', { chat_id: chatId, text: `✅ ${created.address} oluşturuldu.${created.password ? `\n\n🔑 İlk parola:\n<code>${created.password}</code>\n\nBu parolayı hemen güvenli bir yere kaydedin.` : ''}\n\nYeni gelen ve Junk postalar Telegram bildirim akışında izlenir.`, parse_mode: created.password ? 'HTML' : undefined, reply_markup: controlMenu });
       } catch (error) {
         console.error('mailbox create failed', error.message);
-        const messageText = error.message === 'openinbox-not-configured' ? '❌ OpenInbox gizli Render değişkenleri henüz girilmemiş.'
-          : error.message === 'openinbox-forward-destination-unverified' ? '❌ Gmail havuz yönlendirme adresi OpenInbox’ta doğrulanmamış.'
-          : '❌ Kutu oluşturulamadı. OpenInbox bağlantısını kontrol edin.';
+        const messageText = error.message === 'foundermail-not-configured' ? '❌ FounderMail anahtarı Render’da henüz girilmemiş.'
+          : '❌ Kutu oluşturulamadı. FounderMail bağlantısını kontrol edin.';
         await telegram('sendMessage', { chat_id: chatId, text: messageText, reply_markup: controlMenu });
       }
       return send(res, 200, JSON.stringify({ ok: true }));
@@ -304,11 +393,11 @@ http.createServer(async (req, res) => {
     }
     const action = callback?.data || (text === '📬 Menü' ? 'menu' : (/^\/(start|help)/i.test(text) ? 'menu' : 'help'));
     if (action === 'mailbox_create') {
-      if (!isOpenInboxConfigured()) {
-        await telegram('sendMessage', { chat_id: chatId, text: '❌ OpenInbox bağlantısı Render’da yapılandırılmamış. Yönetici gizli değerleri eklediğinde tekrar deneyin.', reply_markup: controlMenu });
+      if (!isFounderMailConfigured()) {
+        await telegram('sendMessage', { chat_id: chatId, text: '❌ FounderMail bağlantısı Render’da yapılandırılmamış.', reply_markup: controlMenu });
       } else {
         pendingMailboxNames.set(chatId, Date.now());
-        await telegram('sendMessage', { chat_id: chatId, text: 'Yeni kutu için sadece isim yazın. Örnek: VFS Fransa → vfs-fransa@clevervize.com', reply_markup: persistentMenu });
+        await telegram('sendMessage', { chat_id: chatId, text: 'Adı yazın. Örnek: İsmail Işık → ismail.isik@clevervize.com. Tek ad yazarsanız isim@clevervize.com oluşur.', reply_markup: persistentMenu });
       }
       return send(res, 200, JSON.stringify({ ok: true }));
     }
@@ -323,11 +412,11 @@ http.createServer(async (req, res) => {
         const lines = mailboxes.slice(0, 30).map(box => `• ${box.address}`);
         const deleteButtons = mailboxes.slice(0, 30)
           .filter(box => !protectedMailboxAddresses.has(String(box.address || '').toLowerCase()))
-          .map(box => [{ text: `🗑 ${box.address}`, callback_data: `delete:${box.id}` }]);
+          .map(box => [{ text: `🗑 ${box.address}`, callback_data: `delete:${encodeURIComponent(box.address || box.key)}` }]);
         await telegram('sendMessage', { chat_id: chatId, text: lines.length ? `📋 Posta kutuları (${mailboxes.length})\nSilmek için aşağıdan bir adres seçin.` : 'Henüz posta kutusu yok.', reply_markup: deleteButtons.length ? { inline_keyboard: [...deleteButtons, [{ text: '↩ Menü', callback_data: 'menu' }]] } : controlMenu });
       } catch (error) {
         console.error('mailbox list failed', error.message);
-        await telegram('sendMessage', { chat_id: chatId, text: '❌ Posta kutuları alınamadı. OpenInbox Render bağlantısını kontrol edin.', reply_markup: controlMenu });
+        await telegram('sendMessage', { chat_id: chatId, text: '❌ Posta kutuları alınamadı. FounderMail Render bağlantısını kontrol edin.', reply_markup: controlMenu });
       }
       return send(res, 200, JSON.stringify({ ok: true }));
     }
@@ -371,15 +460,15 @@ http.createServer(async (req, res) => {
       return send(res, 200, JSON.stringify({ ok: true }));
     }
     if (action.startsWith('delete:')) {
-      const mailboxId = action.slice('delete:'.length);
+      const mailboxId = decodeURIComponent(action.slice('delete:'.length));
       try {
-        const mailbox = (await listMailboxes()).find(item => String(item.id) === mailboxId);
+        const mailbox = (await listMailboxes()).find(item => String(item.id || item.address || item.key) === mailboxId);
         if (!mailbox) throw new Error('mailbox-not-found');
         if (protectedMailboxAddresses.has(String(mailbox.address || '').toLowerCase())) throw new Error('protected-mailbox');
         await telegram('sendMessage', {
           chat_id: chatId,
           text: `⚠️ ${mailbox.address} kutusu ve içindeki postalar kalıcı olarak silinecek.`,
-          reply_markup: { inline_keyboard: [[{ text: '🗑 Evet, kalıcı sil', callback_data: `confirmdelete:${mailbox.id}` }, { text: 'Vazgeç', callback_data: 'mailbox_list' }]] }
+          reply_markup: { inline_keyboard: [[{ text: '🗑 Evet, kalıcı sil', callback_data: `confirmdelete:${encodeURIComponent(mailbox.address || mailbox.key)}` }, { text: 'Vazgeç', callback_data: 'mailbox_list' }]] }
         });
       } catch {
         await telegram('sendMessage', { chat_id: chatId, text: '❌ Kutu bulunamadı.', reply_markup: controlMenu });
@@ -387,12 +476,13 @@ http.createServer(async (req, res) => {
       return send(res, 200, JSON.stringify({ ok: true }));
     }
     if (action.startsWith('confirmdelete:')) {
-      const mailboxId = action.slice('confirmdelete:'.length);
+      const mailboxId = decodeURIComponent(action.slice('confirmdelete:'.length));
       try {
-        const mailbox = (await listMailboxes()).find(item => String(item.id) === mailboxId);
+        const mailbox = (await listMailboxes()).find(item => String(item.id || item.address || item.key) === mailboxId);
         if (!mailbox) throw new Error('mailbox-not-found');
         if (protectedMailboxAddresses.has(String(mailbox.address || '').toLowerCase())) throw new Error('protected-mailbox');
-        await openInboxRequest(`/admin/mailboxes/${mailbox.id}?confirm=${encodeURIComponent(mailbox.address)}`, { method: 'DELETE' });
+        if (isFounderMailConfigured()) await founderMailRequest(`/mailboxes/${encodeURIComponent(mailbox.address || mailbox.key)}`, { method: 'DELETE' });
+        else await openInboxRequest(`/admin/mailboxes/${mailbox.id}?confirm=${encodeURIComponent(mailbox.address)}`, { method: 'DELETE' });
         await telegram('sendMessage', { chat_id: chatId, text: `✅ ${mailbox.address} kalıcı olarak silindi.`, reply_markup: controlMenu });
       } catch (error) {
         console.error('mailbox delete failed', error.message);
@@ -414,4 +504,5 @@ http.createServer(async (req, res) => {
 }).listen(port, '0.0.0.0', () => {
   console.log(`telegram control listening on ${port}`);
   void registerWebhook();
+  void startFounderPolling();
 });
