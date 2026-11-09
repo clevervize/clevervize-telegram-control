@@ -272,11 +272,18 @@ function founderMessageText(mailbox, message) {
   const from = Array.isArray(message?.from) ? message.from.join(', ') : String(message?.from || 'Bilinmeyen gönderici');
   const folder = String(message?.folderRole || message?.folder || '').toLowerCase();
   const isJunk = folder === 'junk' || folder === 'spam';
+  const plainBody = String(message?.body || '')
+    .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ').trim();
+  const otp = plainBody.match(/\b\d{4,8}\b/)?.[0] || '';
   return [
     isJunk ? '⚠️ Junk / spam klasörüne yeni e-posta' : '📬 Yeni Clever Vize e-postası',
     '', `Kutu: ${mailbox.address}`, `Kimden: ${from}`,
     `Konu: ${String(message?.subject || '(konu yok)').slice(0, 500)}`,
-    `Klasör: ${message?.folder || (isJunk ? 'Junk' : 'INBOX')}`
+    `Klasör: ${message?.folder || (isJunk ? 'Junk' : 'INBOX')}`,
+    otp ? `OTP: ${otp}` : '',
+    plainBody ? `İçerik: ${plainBody.slice(0, 1200)}` : ''
   ].join('\n');
 }
 
