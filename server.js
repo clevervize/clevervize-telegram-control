@@ -133,9 +133,7 @@ async function founderMailboxes() {
 }
 
 async function sendInfoEmail({ to, subject, message }) {
-  if (isFounderMailConfigured()) {
-    return founderMailRequest('/messages/info/send', { method: 'POST', body: { to: [to], subject, text: message, html: null, from: null } });
-  }
+  // Gönderimler itibar/teslimat için doğrulanmış Brevo altyapısından çıkar.
   if (!brevoApiKey) throw new Error('brevo-not-configured');
   const response = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', headers: { 'Content-Type': 'application/json', 'api-key': brevoApiKey }, body: JSON.stringify({ sender: { name: 'Clever Vize & Danışmanlık', email: outboundSender }, to: [{ email: to }], replyTo: { email: outboundSender }, subject, textContent: message }) });
   if (!response.ok) throw new Error(`brevo-${response.status}`);
