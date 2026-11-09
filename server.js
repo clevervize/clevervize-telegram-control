@@ -421,6 +421,10 @@ http.createServer(async (req, res) => {
       return send(res, 200, JSON.stringify({ ok: true }));
     }
     if (action === 'password') {
+      if (isFounderMailConfigured()) {
+        await telegram('sendMessage', { chat_id: chatId, text: '🔑 İlk parola kutu oluşturulduğunda güvenli biçimde yalnızca bir kez verilir. FounderMail API parola sıfırlama uç noktası sunmadığı için daha sonraki sıfırlama FounderMail kontrol panelinden yapılır.', reply_markup: controlMenu });
+        return send(res, 200, JSON.stringify({ ok: true }));
+      }
       try {
         const [mailboxes, users] = await Promise.all([listMailboxes(), listMailboxUsers()]);
         const buttons = mailboxes.slice(0, 30).flatMap(box => {
