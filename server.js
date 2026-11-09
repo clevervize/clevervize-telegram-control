@@ -96,12 +96,12 @@ const controlMenu = {
 };
 
 function menuText() {
-  return "Clever Vize e-posta kontrol merkezi. Yeni gerçek posta kutuları FounderMail üzerinde açılır; gelen kutusu ve Junk klasöründeki yeni postalar Telegram'a bildirilir.";
+  return "Clever Vize e-posta yönetim merkezi. Yeni gerçek posta kutuları FounderMail üzerinde açılır; gelen posta bildirimleri ayrı Clever Vize Ajanda botuna gönderilir.";
 }
 
 function responseFor(action) {
   if (action === 'status') return `🟢 Bot aktif. Posta servisi: ${isFounderMailConfigured() ? 'FounderMail hazır' : 'Render değişkenleri eksik'}.`;
-  if (action === 'pool') return '📥 Havuz durumu: havuz@clevervize.com korunan ana kutudur. Tüm Clever Vize kutularındaki gelen ve Junk postalar doğrudan Telegram bildirim akışında izlenir.';
+  if (action === 'pool') return '📥 Havuz durumu: havuz@clevervize.com korunan ana kutudur. Gelen posta bildirimleri Clever Vize Ajanda botu tarafından izlenir.';
   if (action === 'password') return '🔑 Parola işlemleri için aşağıdan bir posta kutusu seçin.';
   if (action === 'help') return 'Alt kısımdaki 📬 Menü düğmesine dilediğiniz an basarak kontrol panelini açabilirsiniz.';
   return menuText();
@@ -513,5 +513,4 @@ http.createServer(async (req, res) => {
 }).listen(port, '0.0.0.0', () => {
   console.log(`telegram control listening on ${port}`);
   void registerWebhook();
-  void startFounderPolling();
 });
